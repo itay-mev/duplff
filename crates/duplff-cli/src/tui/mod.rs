@@ -685,49 +685,47 @@ fn handle_input(key: KeyEvent, state: &mut AppState) -> bool {
                         }
                     }
                 }
-                KeyCode::Char('d') => {
-                    if !marked.is_empty() {
-                        let count = marked.len();
-                        let bytes: u64 = report
-                            .groups
-                            .iter()
-                            .flat_map(|g| g.duplicates.iter())
-                            .filter(|d| marked.contains(&d.entry.path))
-                            .map(|d| d.entry.size)
-                            .sum();
-                        let message = format!(
-                            "Delete {} file{} ({}) to trash?",
-                            count,
-                            if count == 1 { "" } else { "s" },
-                            human_bytes(bytes),
-                        );
-                        let r = std::mem::replace(
-                            report,
-                            duplff_core::models::DuplicateReport {
-                                groups: vec![],
-                                total_files_scanned: 0,
-                                total_bytes_scanned: 0,
-                                total_duplicates: 0,
-                                total_wasted_bytes: 0,
-                            },
-                        );
-                        let gc = *group_cursor;
-                        let dc = *detail_cursor;
-                        let f = *focus;
-                        let m = std::mem::take(marked);
-                        let flt = std::mem::take(filter);
-                        let sm = *sort_mode;
-                        *state = AppState::Confirm {
-                            report: r,
-                            group_cursor: gc,
-                            detail_cursor: dc,
-                            focus: f,
-                            marked: m,
-                            filter: flt,
-                            sort_mode: sm,
-                            message,
-                        };
-                    }
+                KeyCode::Char('d') if !marked.is_empty() => {
+                    let count = marked.len();
+                    let bytes: u64 = report
+                        .groups
+                        .iter()
+                        .flat_map(|g| g.duplicates.iter())
+                        .filter(|d| marked.contains(&d.entry.path))
+                        .map(|d| d.entry.size)
+                        .sum();
+                    let message = format!(
+                        "Delete {} file{} ({}) to trash?",
+                        count,
+                        if count == 1 { "" } else { "s" },
+                        human_bytes(bytes),
+                    );
+                    let r = std::mem::replace(
+                        report,
+                        duplff_core::models::DuplicateReport {
+                            groups: vec![],
+                            total_files_scanned: 0,
+                            total_bytes_scanned: 0,
+                            total_duplicates: 0,
+                            total_wasted_bytes: 0,
+                        },
+                    );
+                    let gc = *group_cursor;
+                    let dc = *detail_cursor;
+                    let f = *focus;
+                    let m = std::mem::take(marked);
+                    let flt = std::mem::take(filter);
+                    let sm = *sort_mode;
+                    *state = AppState::Confirm {
+                        report: r,
+                        group_cursor: gc,
+                        detail_cursor: dc,
+                        focus: f,
+                        marked: m,
+                        filter: flt,
+                        sort_mode: sm,
+                        message,
+                    };
                 }
                 _ => {}
             }
