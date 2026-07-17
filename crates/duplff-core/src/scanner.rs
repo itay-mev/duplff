@@ -8,7 +8,7 @@ use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 use ignore::WalkState;
 use rayon::prelude::*;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Scan directories according to config, returning matching file entries.
@@ -107,7 +107,7 @@ pub fn scan(config: &ScanConfig, progress: &dyn ProgressHandler) -> Result<Vec<F
     drop(tx);
 
     let files: Vec<FileEntry> = rx.iter().collect();
-    let files = dedupe_aliases(files);
+    let files = dedupe_aliases(config, files);
     progress.on_scan_progress(files.len());
     Ok(files)
 }
@@ -120,8 +120,15 @@ pub fn scan(config: &ScanConfig, progress: &dyn ProgressHandler) -> Result<Vec<F
 /// file would be reported as a duplicate of itself and the deletion step could
 /// remove the user's only copy. Entries are keyed by canonicalized path,
 /// falling back to the path as scanned when canonicalization fails (e.g. the
-/// file vanished mid-scan).
-fn dedupe_aliases(files: Vec<FileEntry>) -> Vec<FileEntry> {
+/// file vanished mid-scan). Among aliases the lexicographically smallest path
+/// survives, so the reported path does not depend on walk order.
+fn dedupe_aliases(config: &ScanConfig, files: Vec<FileEntry>) -> Vec<FileEntry> {
+    // A single walk that does not follow symlinks cannot reach one file
+    // through two paths, so the common case skips the canonicalize pass.
+    if config.roots.len() == 1 && !config.follow_symlinks {
+        return files;
+    }
+
     let keyed: Vec<(PathBuf, FileEntry)> = files
         .into_par_iter()
         .map(|f| {
@@ -130,14 +137,20 @@ fn dedupe_aliases(files: Vec<FileEntry>) -> Vec<FileEntry> {
         })
         .collect();
 
-    let mut seen = HashSet::with_capacity(keyed.len());
-    let mut unique = Vec::with_capacity(keyed.len());
+    let mut best: HashMap<PathBuf, FileEntry> = HashMap::with_capacity(keyed.len());
     for (key, file) in keyed {
-        if seen.insert(key) {
-            unique.push(file);
+        match best.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                if file.path < e.get().path {
+                    e.insert(file);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(file);
+            }
         }
     }
-    unique
+    best.into_values().collect()
 }
 
 #[cfg(test)]
@@ -236,6 +249,39 @@ mod tests {
         };
         let files = scan(&config, &NoopProgress).unwrap();
         // sub/c.rs and sub/d.txt are reachable through both roots but must
+        // appear only once each
+        assert_eq!(files.len(), 4);
+    }
+
+    #[test]
+    fn textual_alias_roots_do_not_duplicate_files() {
+        let dir = make_test_tree();
+        // The second root reaches the same tree through a dot-dot hop, so
+        // every file appears under two different path spellings. Only
+        // canonicalization can unify them.
+        let alias = dir.path().join("sub").join("..");
+        let config = ScanConfig {
+            roots: vec![dir.path().to_path_buf(), alias],
+            min_size: 1,
+            ..ScanConfig::default()
+        };
+        let files = scan(&config, &NoopProgress).unwrap();
+        assert_eq!(files.len(), 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_dir_does_not_duplicate_files_when_following() {
+        let dir = make_test_tree();
+        std::os::unix::fs::symlink(dir.path().join("sub"), dir.path().join("sublink")).unwrap();
+        let config = ScanConfig {
+            roots: vec![dir.path().to_path_buf()],
+            min_size: 1,
+            follow_symlinks: true,
+            ..ScanConfig::default()
+        };
+        let files = scan(&config, &NoopProgress).unwrap();
+        // sub/c.rs and sub/d.txt are also reachable through sublink but must
         // appear only once each
         assert_eq!(files.len(), 4);
     }
