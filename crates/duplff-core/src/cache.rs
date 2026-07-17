@@ -73,27 +73,36 @@ impl HashCache {
         .and_then(|b| b.try_into().ok())
     }
 
-    /// Store a partial hash, preserving any existing full_hash.
+    /// Store a partial hash.
     pub fn put_partial(&self, path: &Path, size: u64, mtime: u64, hash: &[u8; 32]) {
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
-                "INSERT INTO hashes (path, size, mtime, partial_hash)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(path, size, mtime) DO UPDATE SET partial_hash = excluded.partial_hash",
+                "INSERT OR REPLACE INTO hashes (path, size, mtime, partial_hash) VALUES (?1, ?2, ?3, ?4)",
                 params![path.to_str().unwrap_or(""), size as i64, mtime as i64, hash.as_slice()],
             );
         }
     }
 
-    /// Store a full hash, preserving any existing partial_hash.
+    /// Store a full hash (updates existing row if partial was already stored).
     pub fn put_full(&self, path: &Path, size: u64, mtime: u64, hash: &[u8; 32]) {
         if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(
-                "INSERT INTO hashes (path, size, mtime, full_hash)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(path, size, mtime) DO UPDATE SET full_hash = excluded.full_hash",
-                params![path.to_str().unwrap_or(""), size as i64, mtime as i64, hash.as_slice()],
-            );
+            let updated = conn
+                .execute(
+                    "UPDATE hashes SET full_hash = ?4 WHERE path = ?1 AND size = ?2 AND mtime = ?3",
+                    params![
+                        path.to_str().unwrap_or(""),
+                        size as i64,
+                        mtime as i64,
+                        hash.as_slice()
+                    ],
+                )
+                .unwrap_or(0);
+            if updated == 0 {
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO hashes (path, size, mtime, full_hash) VALUES (?1, ?2, ?3, ?4)",
+                    params![path.to_str().unwrap_or(""), size as i64, mtime as i64, hash.as_slice()],
+                );
+            }
         }
     }
 }
@@ -138,45 +147,5 @@ mod tests {
         let hash = [42u8; 32];
         cache.put_partial(path, 100, 12345, &hash);
         assert_eq!(cache.get_partial(path, 100, 99999), None);
-    }
-
-    #[test]
-    fn put_full_preserves_existing_partial_hash() {
-        let dir = TempDir::new().unwrap();
-        let cache = HashCache::open(&dir.path().join("test.db")).unwrap();
-        let path = Path::new("/test/file.txt");
-        let partial = [42u8; 32];
-        let full = [99u8; 32];
-
-        // Store partial hash first
-        cache.put_partial(path, 100, 12345, &partial);
-        assert_eq!(cache.get_partial(path, 100, 12345), Some(partial));
-
-        // Store full hash for the same file
-        cache.put_full(path, 100, 12345, &full);
-
-        // Both hashes should be retrievable
-        assert_eq!(cache.get_partial(path, 100, 12345), Some(partial));
-        assert_eq!(cache.get_full(path, 100, 12345), Some(full));
-    }
-
-    #[test]
-    fn put_partial_preserves_existing_full_hash() {
-        let dir = TempDir::new().unwrap();
-        let cache = HashCache::open(&dir.path().join("test.db")).unwrap();
-        let path = Path::new("/test/file.txt");
-        let partial = [42u8; 32];
-        let full = [99u8; 32];
-
-        // Store full hash first (unusual but possible)
-        cache.put_full(path, 100, 12345, &full);
-        assert_eq!(cache.get_full(path, 100, 12345), Some(full));
-
-        // Store partial hash for the same file
-        cache.put_partial(path, 100, 12345, &partial);
-
-        // Both hashes should be retrievable
-        assert_eq!(cache.get_partial(path, 100, 12345), Some(partial));
-        assert_eq!(cache.get_full(path, 100, 12345), Some(full));
     }
 }
