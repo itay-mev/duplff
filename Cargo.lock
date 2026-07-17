@@ -1035,7 +1035,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "duplff-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "crossterm",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "duplff-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "blake3",
  "crossbeam-channel",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "duplff-gui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "csv",
  "duplff-core",
