@@ -120,6 +120,28 @@ fn same_size_different_content_not_grouped() {
 }
 
 #[test]
+fn overlapping_roots_do_not_make_a_file_its_own_duplicate() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join("photos")).unwrap();
+    fs::write(
+        dir.path().join("photos/only_copy.jpg"),
+        "irreplaceable bytes",
+    )
+    .unwrap();
+
+    // The nested root makes only_copy.jpg reachable through both walks
+    let config = ScanConfig {
+        roots: vec![dir.path().to_path_buf(), dir.path().join("photos")],
+        min_size: 1,
+        ..ScanConfig::default()
+    };
+
+    let report = find_duplicates(&config, &NoopProgress).unwrap();
+    assert_eq!(report.total_files_scanned, 1);
+    assert_eq!(report.groups.len(), 0);
+}
+
+#[test]
 fn report_serializes_to_json() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("a.txt"), "dup").unwrap();
