@@ -3,10 +3,13 @@
 use crate::error::{DuplffError, Result};
 use crate::models::{FileEntry, ScanConfig};
 use crate::progress::ProgressHandler;
-use ignore::overrides::OverrideBuilder;
 use crossbeam_channel as channel;
+use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 use ignore::WalkState;
+use rayon::prelude::*;
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 /// Scan directories according to config, returning matching file entries.
 pub fn scan(config: &ScanConfig, progress: &dyn ProgressHandler) -> Result<Vec<FileEntry>> {
@@ -104,8 +107,37 @@ pub fn scan(config: &ScanConfig, progress: &dyn ProgressHandler) -> Result<Vec<F
     drop(tx);
 
     let files: Vec<FileEntry> = rx.iter().collect();
+    let files = dedupe_aliases(files);
     progress.on_scan_progress(files.len());
     Ok(files)
+}
+
+/// Drop entries that alias a file already collected under another entry.
+///
+/// Overlapping roots (e.g. scanning both `/data` and `/data/photos`) emit the
+/// same file once per root, and followed symlinks can reach one file through
+/// several paths. Downstream grouping is purely by (size, hash), so an aliased
+/// file would be reported as a duplicate of itself and the deletion step could
+/// remove the user's only copy. Entries are keyed by canonicalized path,
+/// falling back to the path as scanned when canonicalization fails (e.g. the
+/// file vanished mid-scan).
+fn dedupe_aliases(files: Vec<FileEntry>) -> Vec<FileEntry> {
+    let keyed: Vec<(PathBuf, FileEntry)> = files
+        .into_par_iter()
+        .map(|f| {
+            let key = std::fs::canonicalize(&f.path).unwrap_or_else(|_| f.path.clone());
+            (key, f)
+        })
+        .collect();
+
+    let mut seen = HashSet::with_capacity(keyed.len());
+    let mut unique = Vec::with_capacity(keyed.len());
+    for (key, file) in keyed {
+        if seen.insert(key) {
+            unique.push(file);
+        }
+    }
+    unique
 }
 
 #[cfg(test)]
@@ -180,6 +212,32 @@ mod tests {
         // sub/c.rs and sub/d.txt should be excluded
         assert!(files.iter().all(|f| !f.path.to_str().unwrap().contains("sub")));
         assert_eq!(files.len(), 2); // a.txt and b.py only
+    }
+
+    #[test]
+    fn duplicate_roots_do_not_duplicate_files() {
+        let dir = make_test_tree();
+        let config = ScanConfig {
+            roots: vec![dir.path().to_path_buf(), dir.path().to_path_buf()],
+            min_size: 1,
+            ..ScanConfig::default()
+        };
+        let files = scan(&config, &NoopProgress).unwrap();
+        assert_eq!(files.len(), 4);
+    }
+
+    #[test]
+    fn overlapping_nested_roots_do_not_duplicate_files() {
+        let dir = make_test_tree();
+        let config = ScanConfig {
+            roots: vec![dir.path().to_path_buf(), dir.path().join("sub")],
+            min_size: 1,
+            ..ScanConfig::default()
+        };
+        let files = scan(&config, &NoopProgress).unwrap();
+        // sub/c.rs and sub/d.txt are reachable through both roots but must
+        // appear only once each
+        assert_eq!(files.len(), 4);
     }
 
     #[test]

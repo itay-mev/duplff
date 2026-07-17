@@ -38,6 +38,11 @@ pub fn dry_run(groups: &[DuplicateGroup]) -> ActionPlan {
 
     for group in groups {
         for dup in &group.duplicates {
+            // A duplicate entry that aliases the keep path must never be
+            // planned for deletion. Deleting it would remove the kept file.
+            if dup.entry.path == group.keep.entry.path {
+                continue;
+            }
             files_to_delete.push(dup.entry.path.clone());
             bytes_to_reclaim += group.size;
         }
@@ -56,6 +61,12 @@ pub fn trash_duplicates(groups: &[DuplicateGroup]) -> Result<ActionLog> {
 
     for group in groups {
         for dup in &group.duplicates {
+            // Last line of defense before deletion. Scanning dedupes aliased
+            // paths, but trashing an entry equal to the keep path would
+            // delete the file we promised to keep.
+            if dup.entry.path == group.keep.entry.path {
+                continue;
+            }
             trash::delete(&dup.entry.path).map_err(|e| {
                 DuplffError::TrashError(format!("{}: {}", dup.entry.path.display(), e))
             })?;
@@ -177,6 +188,39 @@ mod tests {
         assert!(!plan
             .files_to_delete
             .contains(&std::path::PathBuf::from("/keep.txt")));
+    }
+
+    #[test]
+    fn dry_run_excludes_duplicates_that_alias_the_keep_path() {
+        // Simulates an upstream failure where the keep path is also listed
+        // as a duplicate. Only the genuinely distinct path may be planned.
+        let groups = vec![make_group(&["/keep.txt", "/keep.txt", "/other.txt"])];
+        let plan = dry_run(&groups);
+        assert_eq!(plan.files_to_delete.len(), 1);
+        assert_eq!(
+            plan.files_to_delete[0],
+            std::path::PathBuf::from("/other.txt")
+        );
+        assert_eq!(plan.bytes_to_reclaim, 100);
+    }
+
+    #[test]
+    fn trash_duplicates_refuses_to_trash_the_keep_path() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let only_copy = dir.path().join("only_copy.txt");
+        fs::write(&only_copy, "irreplaceable").unwrap();
+
+        // Group where the sole "duplicate" is the keep file itself
+        let path_str = only_copy.to_str().unwrap();
+        let groups = vec![make_group(&[path_str, path_str])];
+
+        let log = trash_duplicates(&groups).unwrap();
+        assert!(only_copy.exists(), "keep file must survive");
+        assert!(log.actions.is_empty());
+        assert_eq!(log.bytes_reclaimed, 0);
     }
 
     #[test]
