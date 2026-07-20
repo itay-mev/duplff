@@ -119,6 +119,7 @@ fn render(frame: &mut Frame, state: &AppState) {
             focus,
             marked,
             filter,
+            filter_editing,
             sort_mode,
         } => {
             render_results(
@@ -130,6 +131,7 @@ fn render(frame: &mut Frame, state: &AppState) {
                 *focus,
                 marked,
                 filter,
+                *filter_editing,
                 *sort_mode,
             );
         }
@@ -152,6 +154,7 @@ fn render(frame: &mut Frame, state: &AppState) {
                 *focus,
                 marked,
                 filter,
+                false,
                 *sort_mode,
             );
             render_confirm(frame, area, message);
@@ -174,6 +177,7 @@ fn render(frame: &mut Frame, state: &AppState) {
                 *focus,
                 marked,
                 filter,
+                false,
                 *sort_mode,
             );
             help::render_help(frame, area);
@@ -215,6 +219,7 @@ fn render_results(
     focus: FocusPane,
     marked: &std::collections::HashSet<std::path::PathBuf>,
     filter: &Option<String>,
+    filter_editing: bool,
     sort_mode: SortMode,
 ) {
     // Layout: summary bar (1 line) + groups pane (40%) + detail pane (rest) + help bar (1 line)
@@ -228,50 +233,12 @@ fn render_results(
         ])
         .split(area);
 
-    // Apply filter to groups
-    let filtered_groups: Vec<&duplff_core::models::DuplicateGroup> = if let Some(ref f) = filter {
-        if f.is_empty() {
-            report.groups.iter().collect()
-        } else {
-            let f_lower = f.to_lowercase();
-            report
-                .groups
-                .iter()
-                .filter(|g| {
-                    g.keep
-                        .entry
-                        .path
-                        .to_str()
-                        .is_some_and(|p| p.to_lowercase().contains(&f_lower))
-                        || g.duplicates.iter().any(|d| {
-                            d.entry
-                                .path
-                                .to_str()
-                                .is_some_and(|p| p.to_lowercase().contains(&f_lower))
-                        })
-                })
-                .collect()
-        }
-    } else {
-        report.groups.iter().collect()
-    };
-
-    // Apply sort
-    let mut sorted_groups = filtered_groups;
-    match sort_mode {
-        SortMode::WastedDesc => {
-            sorted_groups.sort_by_key(|g| std::cmp::Reverse(g.wasted_bytes()));
-        }
-        SortMode::SizeDesc => {
-            sorted_groups.sort_by_key(|g| std::cmp::Reverse(g.size));
-        }
-        SortMode::FileCountDesc => {
-            sorted_groups.sort_by_key(|g| std::cmp::Reverse(g.duplicates.len()));
-        }
-        SortMode::PathAsc => {
-            sorted_groups.sort_by(|a, b| a.keep.entry.path.cmp(&b.keep.entry.path));
-        }
-    }
+    // Resolve display order through the same helper as input handling
+    let sorted_groups: Vec<&duplff_core::models::DuplicateGroup> =
+        state::visible_group_indices(report, filter, sort_mode)
+            .into_iter()
+            .map(|i| &report.groups[i])
+            .collect();
 
     // Summary bar
     let summary = Line::from(vec![
@@ -323,52 +290,66 @@ fn render_results(
     );
 
     // Help bar — show workflow-aware hints
-    if filter.is_some() {
+    if filter_editing {
         let filter_text = filter.as_deref().unwrap_or("");
         let filter_bar = Line::from(vec![
             Span::styled(" /", Style::default().fg(Color::Yellow)),
             Span::raw(filter_text),
             Span::styled("_", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                "  (Enter:apply  Esc:clear)",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]);
         frame.render_widget(Paragraph::new(filter_bar), chunks[3]);
-    } else if marked.is_empty() {
-        let help_bar = Line::from(vec![
-            Span::styled(" Tab", Style::default().fg(Color::Yellow)),
-            Span::raw(":switch  "),
-            Span::styled("Enter", Style::default().fg(Color::Yellow)),
-            Span::raw(":select  "),
-            Span::styled("Space", Style::default().fg(Color::Yellow)),
-            Span::raw(":mark  "),
-            Span::styled("D", Style::default().fg(Color::Yellow)),
-            Span::raw(":mark-all  "),
-            Span::styled("j/k", Style::default().fg(Color::Yellow)),
-            Span::raw(":nav  "),
-            Span::styled("?", Style::default().fg(Color::Yellow)),
-            Span::raw(":help  "),
-            Span::styled("q", Style::default().fg(Color::Yellow)),
-            Span::raw(":quit"),
-        ]);
-        frame.render_widget(
-            Paragraph::new(help_bar).style(Style::default().fg(Color::DarkGray)),
-            chunks[3],
-        );
     } else {
-        let help_bar = Line::from(vec![
-            Span::styled(" d", Style::default().fg(Color::Red)),
-            Span::raw(":trash marked  "),
-            Span::styled("u", Style::default().fg(Color::Yellow)),
-            Span::raw(":unmark  "),
-            Span::styled("Space", Style::default().fg(Color::Yellow)),
-            Span::raw(":toggle  "),
-            Span::styled("j/k", Style::default().fg(Color::Yellow)),
-            Span::raw(":nav  "),
-            Span::styled("?", Style::default().fg(Color::Yellow)),
-            Span::raw(":help  "),
-            Span::styled("q", Style::default().fg(Color::Yellow)),
-            Span::raw(":quit"),
-        ]);
+        // An applied filter stays visible so users know why groups are hidden
+        let filter_hint = match filter {
+            Some(f) => vec![
+                Span::styled(
+                    format!(" [filter: {f}]"),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw("  "),
+            ],
+            None => vec![Span::raw(" ")],
+        };
+        let mut spans = filter_hint;
+        if marked.is_empty() {
+            spans.extend([
+                Span::styled("Tab", Style::default().fg(Color::Yellow)),
+                Span::raw(":switch  "),
+                Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                Span::raw(":select  "),
+                Span::styled("Space", Style::default().fg(Color::Yellow)),
+                Span::raw(":mark  "),
+                Span::styled("D", Style::default().fg(Color::Yellow)),
+                Span::raw(":mark-all  "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(":nav  "),
+                Span::styled("?", Style::default().fg(Color::Yellow)),
+                Span::raw(":help  "),
+                Span::styled("q", Style::default().fg(Color::Yellow)),
+                Span::raw(":quit"),
+            ]);
+        } else {
+            spans.extend([
+                Span::styled("d", Style::default().fg(Color::Red)),
+                Span::raw(":trash marked  "),
+                Span::styled("u", Style::default().fg(Color::Yellow)),
+                Span::raw(":unmark  "),
+                Span::styled("Space", Style::default().fg(Color::Yellow)),
+                Span::raw(":toggle  "),
+                Span::styled("j/k", Style::default().fg(Color::Yellow)),
+                Span::raw(":nav  "),
+                Span::styled("?", Style::default().fg(Color::Yellow)),
+                Span::raw(":help  "),
+                Span::styled("q", Style::default().fg(Color::Yellow)),
+                Span::raw(":quit"),
+            ]);
+        }
         frame.render_widget(
-            Paragraph::new(help_bar).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(Line::from(spans)).style(Style::default().fg(Color::DarkGray)),
             chunks[3],
         );
     }
@@ -393,6 +374,129 @@ fn render_confirm(frame: &mut Frame, area: Rect, message: &str) {
 
     frame.render_widget(Clear, confirm_area);
     frame.render_widget(paragraph, confirm_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use duplff_core::models::{DuplicateGroup, DuplicateReport, FileEntry, KeepReason, RankedFile};
+    use std::path::Path;
+    use std::time::SystemTime;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ranked(path: &str, size: u64) -> RankedFile {
+        RankedFile {
+            entry: FileEntry {
+                path: path.into(),
+                size,
+                modified: SystemTime::UNIX_EPOCH,
+            },
+            reason: KeepReason::LexicographicFirst,
+        }
+    }
+
+    /// Group 0 wastes few bytes and group 1 wastes many, so the default
+    /// WastedDesc sort displays them in the reverse of storage order.
+    fn make_report() -> DuplicateReport {
+        let g_small = DuplicateGroup {
+            hash: [0u8; 32],
+            size: 10,
+            keep: ranked("/small/keep.txt", 10),
+            duplicates: vec![ranked("/small/dup.txt", 10)],
+        };
+        let g_big = DuplicateGroup {
+            hash: [1u8; 32],
+            size: 1000,
+            keep: ranked("/big/keep.txt", 1000),
+            duplicates: vec![ranked("/big/dup.txt", 1000)],
+        };
+        DuplicateReport {
+            groups: vec![g_small, g_big],
+            total_files_scanned: 4,
+            total_bytes_scanned: 2020,
+            total_duplicates: 2,
+            total_wasted_bytes: 1010,
+        }
+    }
+
+    fn type_filter(state: &mut AppState, text: &str) {
+        handle_input(key(KeyCode::Char('/')), state);
+        for c in text.chars() {
+            handle_input(key(KeyCode::Char(c)), state);
+        }
+        handle_input(key(KeyCode::Enter), state);
+    }
+
+    #[test]
+    fn marking_acts_on_the_group_shown_at_the_cursor() {
+        let mut state = AppState::into_results(make_report());
+        // Enter the detail pane of the first displayed group. WastedDesc
+        // shows /big first even though it is stored second.
+        handle_input(key(KeyCode::Enter), &mut state);
+        handle_input(key(KeyCode::Char('D')), &mut state);
+        let AppState::Results { marked, .. } = &state else {
+            panic!("expected results state");
+        };
+        assert!(
+            marked.contains(Path::new("/big/dup.txt")),
+            "mark-all must hit the displayed group, marked: {marked:?}"
+        );
+        assert!(!marked.contains(Path::new("/small/dup.txt")));
+    }
+
+    #[test]
+    fn applied_filter_allows_navigation_keys() {
+        let mut state = AppState::into_results(make_report());
+        type_filter(&mut state, "small");
+        // After Enter the filter is applied and j must navigate, not append
+        handle_input(key(KeyCode::Char('j')), &mut state);
+        let AppState::Results { filter, .. } = &state else {
+            panic!("expected results state");
+        };
+        assert_eq!(filter.as_deref(), Some("small"));
+    }
+
+    #[test]
+    fn marking_respects_active_filter() {
+        let mut state = AppState::into_results(make_report());
+        type_filter(&mut state, "small");
+        // Only /small is visible, so mark-all at cursor 0 must hit it
+        handle_input(key(KeyCode::Enter), &mut state);
+        handle_input(key(KeyCode::Char('D')), &mut state);
+        let AppState::Results { marked, .. } = &state else {
+            panic!("expected results state");
+        };
+        assert!(marked.contains(Path::new("/small/dup.txt")));
+        assert!(!marked.contains(Path::new("/big/dup.txt")));
+    }
+
+    #[test]
+    fn cursor_clamps_to_visible_groups() {
+        let mut state = AppState::into_results(make_report());
+        type_filter(&mut state, "small");
+        handle_input(key(KeyCode::Char('j')), &mut state);
+        let AppState::Results { group_cursor, .. } = &state else {
+            panic!("expected results state");
+        };
+        assert_eq!(*group_cursor, 0, "cursor must clamp to the filtered list");
+    }
+
+    #[test]
+    fn esc_clears_applied_filter_before_quitting() {
+        let mut state = AppState::into_results(make_report());
+        type_filter(&mut state, "small");
+        let quit = handle_input(key(KeyCode::Esc), &mut state);
+        assert!(!quit, "first Esc clears the filter instead of quitting");
+        let AppState::Results { filter, .. } = &state else {
+            panic!("expected results state");
+        };
+        assert!(filter.is_none());
+        let quit = handle_input(key(KeyCode::Esc), &mut state);
+        assert!(quit, "second Esc quits");
+    }
 }
 
 /// Handle a key event. Returns true if the app should quit.
@@ -446,6 +550,7 @@ fn handle_input(key: KeyEvent, state: &mut AppState) -> bool {
                 focus: f,
                 marked: m,
                 filter: flt,
+                filter_editing: false,
                 sort_mode: sm,
             };
         }
@@ -508,6 +613,7 @@ fn handle_input(key: KeyEvent, state: &mut AppState) -> bool {
                     focus: FocusPane::Groups,
                     marked: std::collections::HashSet::new(),
                     filter: None,
+                    filter_editing: false,
                     sort_mode: sm,
                 };
             }
@@ -536,6 +642,7 @@ fn handle_input(key: KeyEvent, state: &mut AppState) -> bool {
                     focus: f,
                     marked: m,
                     filter: flt,
+                    filter_editing: false,
                     sort_mode: sm,
                 };
             }
@@ -547,45 +654,76 @@ fn handle_input(key: KeyEvent, state: &mut AppState) -> bool {
             focus,
             marked,
             filter,
+            filter_editing,
             sort_mode,
         } => {
-            // Filter input mode — capture keystrokes
-            if let Some(ref mut f) = filter {
+            // While editing, keystrokes go to the filter text
+            if *filter_editing {
                 match key.code {
                     KeyCode::Esc => {
                         *filter = None;
+                        *filter_editing = false;
+                        *group_cursor = 0;
+                        *detail_cursor = 0;
                     }
                     KeyCode::Enter => {
-                        // Exit filter input mode but keep the filter text
-                        // If empty, clear filter entirely
-                        if f.is_empty() {
+                        // Apply the filter and hand keys back to navigation.
+                        // An empty filter is cleared entirely.
+                        if filter.as_deref().is_none_or(|f| f.is_empty()) {
                             *filter = None;
                         }
-                        // Otherwise just stop capturing keys — filter stays active
+                        *filter_editing = false;
                     }
                     KeyCode::Backspace => {
-                        f.pop();
-                        if f.is_empty() {
-                            *filter = None;
+                        if let Some(f) = filter {
+                            f.pop();
+                            if f.is_empty() {
+                                *filter = None;
+                                *filter_editing = false;
+                            }
                         }
+                        *group_cursor = 0;
+                        *detail_cursor = 0;
                     }
                     KeyCode::Char(c) => {
-                        f.push(c);
+                        if let Some(f) = filter {
+                            f.push(c);
+                        }
                         *group_cursor = 0;
+                        *detail_cursor = 0;
                     }
                     _ => {}
                 }
                 return false;
             }
 
+            // The group cursor is a position in the displayed order, so
+            // resolve it to a report index before touching any group.
+            let visible = state::visible_group_indices(report, filter, *sort_mode);
+            let group_at_cursor = visible.get(*group_cursor).copied();
+
             match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return true,
+                KeyCode::Char('q') => return true,
+                KeyCode::Esc => {
+                    // Esc clears an applied filter before it quits
+                    if filter.is_some() {
+                        *filter = None;
+                        *group_cursor = 0;
+                        *detail_cursor = 0;
+                    } else {
+                        return true;
+                    }
+                }
                 KeyCode::Char('/') => {
-                    *filter = Some(String::new());
+                    if filter.is_none() {
+                        *filter = Some(String::new());
+                    }
+                    *filter_editing = true;
                 }
                 KeyCode::Char('s') => {
                     *sort_mode = sort_mode.next();
                     *group_cursor = 0;
+                    *detail_cursor = 0;
                 }
                 KeyCode::Char('?') => {
                     let r = std::mem::replace(
@@ -621,21 +759,21 @@ fn handle_input(key: KeyEvent, state: &mut AppState) -> bool {
                     };
                 }
                 KeyCode::Enter => {
-                    if *focus == FocusPane::Groups {
+                    if *focus == FocusPane::Groups && group_at_cursor.is_some() {
                         *focus = FocusPane::Detail;
                         *detail_cursor = 0;
                     }
                 }
                 KeyCode::Char('j') | KeyCode::Down => match focus {
                     FocusPane::Groups => {
-                        if !report.groups.is_empty() {
-                            *group_cursor = (*group_cursor + 1).min(report.groups.len() - 1);
+                        if !visible.is_empty() {
+                            *group_cursor = (*group_cursor + 1).min(visible.len() - 1);
                             *detail_cursor = 0;
                         }
                     }
                     FocusPane::Detail => {
-                        if let Some(group) = report.groups.get(*group_cursor) {
-                            let max = group.duplicates.len(); // 0 = keep, 1..=n = dups
+                        if let Some(gi) = group_at_cursor {
+                            let max = report.groups[gi].duplicates.len(); // 0 = keep, 1..=n = dups
                             *detail_cursor = (*detail_cursor + 1).min(max);
                         }
                     }
@@ -651,7 +789,7 @@ fn handle_input(key: KeyEvent, state: &mut AppState) -> bool {
                 },
                 KeyCode::Char(' ') => {
                     if *focus == FocusPane::Detail {
-                        if let Some(group) = report.groups.get(*group_cursor) {
+                        if let Some(group) = group_at_cursor.map(|gi| &report.groups[gi]) {
                             // detail_cursor 0 = keep file (can't mark), 1+ = duplicates
                             if *detail_cursor > 0 {
                                 let dup_idx = *detail_cursor - 1;
@@ -669,8 +807,8 @@ fn handle_input(key: KeyEvent, state: &mut AppState) -> bool {
                 }
                 KeyCode::Char('D') => {
                     if *focus == FocusPane::Detail {
-                        if let Some(group) = report.groups.get(*group_cursor) {
-                            for dup in &group.duplicates {
+                        if let Some(gi) = group_at_cursor {
+                            for dup in &report.groups[gi].duplicates {
                                 marked.insert(dup.entry.path.clone());
                             }
                         }
@@ -678,8 +816,8 @@ fn handle_input(key: KeyEvent, state: &mut AppState) -> bool {
                 }
                 KeyCode::Char('u') => {
                     if *focus == FocusPane::Detail {
-                        if let Some(group) = report.groups.get(*group_cursor) {
-                            for dup in &group.duplicates {
+                        if let Some(gi) = group_at_cursor {
+                            for dup in &report.groups[gi].duplicates {
                                 marked.remove(&dup.entry.path);
                             }
                         }
