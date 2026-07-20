@@ -10,26 +10,32 @@ Run with just paths to launch the TUI:
 duplff ~/Documents ~/Downloads
 ```
 
-The TUI has three views:
+The TUI has two screens:
 
-- **Scan** — Real-time progress showing files found, hashing progress, and elapsed time.
-- **Results** — Table of duplicate groups sorted by wasted space. Press `/` to search, `s` to cycle sort mode, `a` to auto-select all duplicates, `d` to trash selected.
-- **Detail** — View all files in a group. Space to toggle selection, `d` to trash, `u` to undo, `o` to open in file manager.
+- **Scan** shows live progress: files found while walking, then hashing progress.
+- **Results** shows a table of duplicate groups next to a detail pane for the
+  selected group. Groups are sorted by wasted space by default. Mark duplicates
+  in the detail pane, then press `d` to move everything marked to the trash
+  after a confirmation prompt.
 
 ### Key Bindings
 
 | Key | Action |
 |-----|--------|
-| `q` / `Esc` | Quit / Back |
+| `q` | Quit |
+| `Esc` | Clear the active filter, or quit if none |
 | `j` / `k` / `↑` / `↓` | Navigate |
-| `Enter` | Open group detail |
-| `Space` | Toggle file selection |
-| `a` | Auto-select all duplicates |
-| `d` | Trash selected files |
-| `u` | Undo last trash |
-| `s` | Cycle sort mode |
-| `/` | Search / filter |
-| `o` | Open in file manager |
+| `Tab` | Switch between groups and detail panes |
+| `Enter` | Open the selected group's detail pane |
+| `Space` | Toggle deletion mark on the selected duplicate |
+| `D` | Mark every duplicate in the current group |
+| `u` | Unmark every duplicate in the current group |
+| `d` | Trash marked files (asks for confirmation) |
+| `s` | Cycle sort mode (wasted, size, files, path) |
+| `/` | Filter groups by path substring (Enter applies, Esc clears) |
+| `?` | Help overlay |
+
+The keep file in each group can never be marked for deletion.
 
 ## Non-Interactive Modes
 

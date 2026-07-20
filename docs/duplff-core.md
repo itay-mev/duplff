@@ -20,12 +20,12 @@ Core library for duplicate file detection. Used by both the CLI and GUI.
 
 ## Features
 
-- **Hash cache** — SQLite-based cache at `~/.local/share/duplff/cache.db`. Keyed by path + mtime. Disabled with `no_cache`.
-- **Paranoid mode** — After hash matching, performs byte-by-byte comparison to confirm files are identical.
-- **Safe deletion** — Uses the `trash` crate to move files to the OS trash (never permanently deletes).
-- **Action logs** — Every trash operation is saved as JSON to `~/.local/share/duplff/logs/`. Supports undo by restoring from trash.
-- **Dry run** — Produces an `ActionPlan` listing files that would be deleted and bytes that would be reclaimed.
-- **Progress reporting** — `ProgressHandler` trait with callbacks for scan progress, hash progress, and completion.
+- **Hash cache**: SQLite-based cache at `~/.cache/duplff/hashes.db` (the OS cache directory, so `%LOCALAPPDATA%` on Windows). Keyed by path + size + mtime. Disabled with `no_cache`.
+- **Paranoid mode**: After hash matching, performs byte-by-byte comparison to confirm files are identical.
+- **Safe deletion**: Uses the `trash` crate to move files to the OS trash (never permanently deletes).
+- **Action logs**: Every trash operation is saved as JSON to `~/.local/share/duplff/logs/`. Supports undo by restoring from trash.
+- **Dry run**: Produces an `ActionPlan` listing files that would be deleted and bytes that would be reclaimed.
+- **Progress reporting**: `ProgressHandler` trait with callbacks for scan progress, hash progress, and completion.
 
 ## Dependencies
 
