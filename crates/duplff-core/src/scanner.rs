@@ -4,12 +4,16 @@ use crate::error::{DuplffError, Result};
 use crate::models::{FileEntry, ScanConfig};
 use crate::progress::ProgressHandler;
 use crossbeam_channel as channel;
-use ignore::overrides::OverrideBuilder;
+use ignore::overrides::{Override, OverrideBuilder};
 use ignore::WalkBuilder;
 use ignore::WalkState;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+/// How many collected files between scan progress updates.
+const SCAN_PROGRESS_INTERVAL: usize = 512;
 
 /// Scan directories according to config, returning matching file entries.
 pub fn scan(config: &ScanConfig, progress: &dyn ProgressHandler) -> Result<Vec<FileEntry>> {
@@ -31,19 +35,32 @@ pub fn scan(config: &ScanConfig, progress: &dyn ProgressHandler) -> Result<Vec<F
         .git_exclude(true);
 
     if !config.exclude_patterns.is_empty() {
-        // OverrideBuilder needs a base path for relative patterns; roots[0] is fine
-        // because overrides apply to all paths once attached to WalkBuilder.
-        let mut overrides = OverrideBuilder::new(&config.roots[0]);
-        for pattern in &config.exclude_patterns {
-            // Negate the pattern so it's excluded
-            overrides
-                .add(&format!("!{pattern}"))
+        // Override patterns that contain a slash are anchored to the matcher's
+        // base directory. A single matcher based on roots[0] would silently
+        // stop excluding anything under the other roots, so each root gets its
+        // own matcher and entries are checked against the root they belong to.
+        let mut matchers: Vec<(PathBuf, Override)> = Vec::with_capacity(config.roots.len());
+        for root in &config.roots {
+            let mut overrides = OverrideBuilder::new(root);
+            for pattern in &config.exclude_patterns {
+                // Negate the pattern so it's excluded
+                overrides
+                    .add(&format!("!{pattern}"))
+                    .map_err(|e| DuplffError::ScanError(e.to_string()))?;
+            }
+            let overrides = overrides
+                .build()
                 .map_err(|e| DuplffError::ScanError(e.to_string()))?;
+            matchers.push((root.clone(), overrides));
         }
-        let overrides = overrides
-            .build()
-            .map_err(|e| DuplffError::ScanError(e.to_string()))?;
-        builder.overrides(overrides);
+        let matchers = Arc::new(matchers);
+        builder.filter_entry(move |entry| {
+            let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+            !matchers.iter().any(|(root, overrides)| {
+                entry.path().starts_with(root)
+                    && overrides.matched(entry.path(), is_dir).is_ignore()
+            })
+        });
     }
 
     let min_size = config.min_size;
@@ -52,61 +69,75 @@ pub fn scan(config: &ScanConfig, progress: &dyn ProgressHandler) -> Result<Vec<F
 
     let (tx, rx) = channel::unbounded();
 
-    builder.build_parallel().run(|| {
-        let tx = tx.clone();
-        let extensions = extensions.clone();
-        Box::new(move |result| {
-            let entry = match result {
-                Ok(e) => e,
-                Err(_) => return WalkState::Continue,
-            };
+    let walker = builder.build_parallel();
+    let walk = move || {
+        walker.run(|| {
+            let tx = tx.clone();
+            let extensions = extensions.clone();
+            Box::new(move |result| {
+                let entry = match result {
+                    Ok(e) => e,
+                    Err(_) => return WalkState::Continue,
+                };
 
-            // Skip non-files
-            match entry.file_type() {
-                Some(ft) if ft.is_file() => {}
-                _ => return WalkState::Continue,
-            }
-
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => return WalkState::Continue,
-            };
-            let size = metadata.len();
-
-            // Size filter
-            if size < min_size {
-                return WalkState::Continue;
-            }
-            if let Some(max) = max_size {
-                if size > max {
-                    return WalkState::Continue;
-                }
-            }
-
-            // Extension filter
-            if let Some(ref exts) = extensions {
-                let file_ext = entry.path().extension().and_then(|e| e.to_str());
-                match file_ext {
-                    Some(ext) if exts.iter().any(|e| e.eq_ignore_ascii_case(ext)) => {}
+                // Skip non-files
+                match entry.file_type() {
+                    Some(ft) if ft.is_file() => {}
                     _ => return WalkState::Continue,
                 }
-            }
 
-            let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
-            let _ = tx.send(FileEntry {
-                path: entry.into_path(),
-                size,
-                modified,
-            });
+                let metadata = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => return WalkState::Continue,
+                };
+                let size = metadata.len();
 
-            WalkState::Continue
+                // Size filter
+                if size < min_size {
+                    return WalkState::Continue;
+                }
+                if let Some(max) = max_size {
+                    if size > max {
+                        return WalkState::Continue;
+                    }
+                }
+
+                // Extension filter
+                if let Some(ref exts) = extensions {
+                    let file_ext = entry.path().extension().and_then(|e| e.to_str());
+                    match file_ext {
+                        Some(ext) if exts.iter().any(|e| e.eq_ignore_ascii_case(ext)) => {}
+                        _ => return WalkState::Continue,
+                    }
+                }
+
+                let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+                let _ = tx.send(FileEntry {
+                    path: entry.into_path(),
+                    size,
+                    modified,
+                });
+
+                WalkState::Continue
+            })
         })
+    };
+
+    // Collect on this thread while the walker runs on another so progress
+    // can be reported as files are discovered. The walk closure owns the
+    // only original sender, so rx terminates when the walk finishes.
+    let files: Vec<FileEntry> = std::thread::scope(|s| {
+        s.spawn(walk);
+        let mut files = Vec::new();
+        for entry in rx.iter() {
+            files.push(entry);
+            if files.len().is_multiple_of(SCAN_PROGRESS_INTERVAL) {
+                progress.on_scan_progress(files.len());
+            }
+        }
+        files
     });
 
-    // Drop the original sender so rx terminates
-    drop(tx);
-
-    let files: Vec<FileEntry> = rx.iter().collect();
     let files = dedupe_aliases(config, files);
     progress.on_scan_progress(files.len());
     Ok(files)
@@ -223,8 +254,72 @@ mod tests {
         };
         let files = scan(&config, &NoopProgress).unwrap();
         // sub/c.rs and sub/d.txt should be excluded
-        assert!(files.iter().all(|f| !f.path.to_str().unwrap().contains("sub")));
+        assert!(files
+            .iter()
+            .all(|f| !f.path.to_str().unwrap().contains("sub")));
         assert_eq!(files.len(), 2); // a.txt and b.py only
+    }
+
+    #[test]
+    fn anchored_exclude_applies_to_every_root() {
+        // Anchored patterns (containing a slash) are matched relative to a
+        // base directory. Each root must get its own matcher or the pattern
+        // silently stops excluding anything outside the first root.
+        let root_a = make_test_tree();
+        let root_b = make_test_tree();
+        let config = ScanConfig {
+            roots: vec![root_a.path().to_path_buf(), root_b.path().to_path_buf()],
+            min_size: 1,
+            exclude_patterns: vec!["sub/*.txt".to_string()],
+            ..ScanConfig::default()
+        };
+        let files = scan(&config, &NoopProgress).unwrap();
+        assert!(
+            files.iter().all(|f| f.path.file_name().unwrap() != "d.txt"),
+            "sub/d.txt leaked through the exclude in one of the roots: {files:?}"
+        );
+        // a.txt, b.py, and sub/c.rs from each root
+        assert_eq!(files.len(), 6);
+    }
+
+    #[test]
+    fn scan_reports_intermediate_progress() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Recorder {
+            calls: AtomicUsize,
+            last: AtomicUsize,
+        }
+        impl ProgressHandler for Recorder {
+            fn on_scan_progress(&self, files_found: usize) {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.last.store(files_found, Ordering::Relaxed);
+            }
+            fn on_hash_progress(&self, _: usize, _: usize) {}
+            fn on_complete(&self, _: usize) {}
+        }
+
+        let dir = TempDir::new().unwrap();
+        for i in 0..1200 {
+            fs::write(dir.path().join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let config = ScanConfig {
+            roots: vec![dir.path().to_path_buf()],
+            min_size: 1,
+            ..ScanConfig::default()
+        };
+        let recorder = Recorder {
+            calls: AtomicUsize::new(0),
+            last: AtomicUsize::new(0),
+        };
+        let files = scan(&config, &recorder).unwrap();
+        assert_eq!(files.len(), 1200);
+        // At least one update while collecting plus the final count
+        assert!(
+            recorder.calls.load(Ordering::Relaxed) >= 2,
+            "expected intermediate scan progress updates"
+        );
+        assert_eq!(recorder.last.load(Ordering::Relaxed), 1200);
     }
 
     #[test]
