@@ -57,7 +57,7 @@ pub fn find_duplicate_groups(
                 h
             };
             let count = hashed_count.fetch_add(1, Ordering::Relaxed) + 1;
-            if count.is_multiple_of(100) {
+            if count.is_multiple_of(100) || count == total {
                 progress.on_hash_progress(count, total);
             }
             Ok((entry, hash))
@@ -109,7 +109,7 @@ pub fn find_duplicate_groups(
                 h
             };
             let count = hashed_count.fetch_add(1, Ordering::Relaxed) + 1;
-            if count.is_multiple_of(100) {
+            if count.is_multiple_of(100) || count == total {
                 progress.on_hash_progress(count, total);
             }
             Ok(HashedFile { entry, hash })
@@ -203,6 +203,52 @@ mod tests {
         ];
         let groups = group_by_size(files);
         assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn hash_progress_reports_final_count() {
+        use crate::progress::ProgressHandler;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Recorder {
+            last_done: AtomicUsize,
+            last_total: AtomicUsize,
+        }
+        impl ProgressHandler for Recorder {
+            fn on_scan_progress(&self, _: usize) {}
+            fn on_hash_progress(&self, done: usize, total: usize) {
+                self.last_done.store(done, Ordering::Relaxed);
+                self.last_total.store(total, Ordering::Relaxed);
+            }
+            fn on_complete(&self, _: usize) {}
+        }
+
+        let dir = TempDir::new().unwrap();
+        // Two duplicates: far fewer than the 100-file reporting interval,
+        // so only the completion update can fire.
+        fs::write(dir.path().join("a.txt"), "same").unwrap();
+        fs::write(dir.path().join("b.txt"), "same").unwrap();
+        let files: Vec<FileEntry> = ["a.txt", "b.txt"]
+            .iter()
+            .map(|name| {
+                let path = dir.path().join(name);
+                let meta = fs::metadata(&path).unwrap();
+                FileEntry {
+                    path,
+                    size: meta.len(),
+                    modified: meta.modified().unwrap(),
+                }
+            })
+            .collect();
+
+        let recorder = Recorder {
+            last_done: AtomicUsize::new(0),
+            last_total: AtomicUsize::new(0),
+        };
+        let groups = find_duplicate_groups(files, &recorder, None, false).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(recorder.last_done.load(Ordering::Relaxed), 2);
+        assert_eq!(recorder.last_total.load(Ordering::Relaxed), 2);
     }
 
     #[test]
