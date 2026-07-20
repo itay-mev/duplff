@@ -123,17 +123,17 @@ pub fn undo(log: &ActionLog) -> Result<UndoResult> {
             // Restore the most recently trashed matching item
             if let Err(e) = trash::os_limited::restore_all(matching.into_iter().take(1)) {
                 not_found.push(record.path.clone());
-                eprintln!(
-                    "warning: could not restore {}: {e}",
-                    record.path.display()
-                );
+                eprintln!("warning: could not restore {}: {e}", record.path.display());
             } else {
                 restored.push(record.path.clone());
             }
         }
     }
 
-    Ok(UndoResult { restored, not_found })
+    Ok(UndoResult {
+        restored,
+        not_found,
+    })
 }
 
 #[cfg(test)]

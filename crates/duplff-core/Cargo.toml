@@ -1,6 +1,6 @@
 [package]
 name = "duplff-core"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Core duplicate file detection library for duplff"
 license = "MIT"

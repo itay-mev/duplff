@@ -14,15 +14,13 @@ impl HashCache {
         let cache_dir = dirs::cache_dir()
             .ok_or_else(|| DuplffError::CacheError("cannot determine cache directory".into()))?
             .join("duplff");
-        std::fs::create_dir_all(&cache_dir)
-            .map_err(|e| DuplffError::CacheError(e.to_string()))?;
+        std::fs::create_dir_all(&cache_dir).map_err(|e| DuplffError::CacheError(e.to_string()))?;
         Self::open(&cache_dir.join("hashes.db"))
     }
 
     /// Open (or create) a cache at a specific path.
     pub fn open(path: &Path) -> Result<Self> {
-        let conn =
-            Connection::open(path).map_err(|e| DuplffError::CacheError(e.to_string()))?;
+        let conn = Connection::open(path).map_err(|e| DuplffError::CacheError(e.to_string()))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS hashes (
                 path TEXT NOT NULL,
@@ -45,9 +43,7 @@ impl HashCache {
     pub fn get_partial(&self, path: &Path, size: u64, mtime: u64) -> Option<[u8; 32]> {
         let conn = self.conn.lock().ok()?;
         let mut stmt = conn
-            .prepare(
-                "SELECT partial_hash FROM hashes WHERE path = ?1 AND size = ?2 AND mtime = ?3",
-            )
+            .prepare("SELECT partial_hash FROM hashes WHERE path = ?1 AND size = ?2 AND mtime = ?3")
             .ok()?;
         stmt.query_row(params![path.to_str()?, size as i64, mtime as i64], |row| {
             let blob: Vec<u8> = row.get(0)?;
@@ -61,9 +57,7 @@ impl HashCache {
     pub fn get_full(&self, path: &Path, size: u64, mtime: u64) -> Option<[u8; 32]> {
         let conn = self.conn.lock().ok()?;
         let mut stmt = conn
-            .prepare(
-                "SELECT full_hash FROM hashes WHERE path = ?1 AND size = ?2 AND mtime = ?3",
-            )
+            .prepare("SELECT full_hash FROM hashes WHERE path = ?1 AND size = ?2 AND mtime = ?3")
             .ok()?;
         stmt.query_row(params![path.to_str()?, size as i64, mtime as i64], |row| {
             let blob: Vec<u8> = row.get(0)?;
@@ -94,7 +88,12 @@ impl HashCache {
                     "INSERT INTO hashes (path, size, mtime, full_hash) VALUES (?1, ?2, ?3, ?4) ",
                     "ON CONFLICT(path, size, mtime) DO UPDATE SET full_hash = excluded.full_hash"
                 ),
-                params![path.to_str().unwrap_or(""), size as i64, mtime as i64, hash.as_slice()],
+                params![
+                    path.to_str().unwrap_or(""),
+                    size as i64,
+                    mtime as i64,
+                    hash.as_slice()
+                ],
             );
         }
     }

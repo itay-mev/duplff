@@ -1,6 +1,6 @@
 [package]
 name = "duplff-cli"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "CLI and TUI interface for duplff duplicate file finder"
 license = "MIT"
